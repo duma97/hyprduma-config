@@ -1,13 +1,4 @@
-#!/bin/bash
-# Sync Caelestia wallpaper with swaybg
-
-WALLPAPER_PATH=$(pgrep -a swaybg | grep -oP '(?<=-i )[^ ]+' | head -1)
-
-if [ -n "$WALLPAPER_PATH" ] && [ -f "$WALLPAPER_PATH" ]; then
-    mkdir -p ~/.local/state/caelestia/wallpaper
-    ln -sf "$WALLPAPER_PATH" ~/.local/state/caelestia/wallpaper/current
-    echo "$WALLPAPER_PATH" > ~/.local/state/caelestia/wallpaper/path.txt
-    echo "✓ Caelestia wallpaper synced to: $WALLPAPER_PATH"
-else
-    echo "⚠ Could not detect swaybg wallpaper"
-fi
+#!/bin/sh
+# Compatibility entry point: use saved theme state, never scrape process args.
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+exec python3 "$SCRIPT_DIR/theme.py" --sync-wallpaper-only "$@"

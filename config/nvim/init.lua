@@ -1,18 +1,30 @@
--- Path for lazy.nvim plugin manager
+if vim.fn.has("nvim-0.12") == 0 then
+    error("This configuration requires Neovim 0.12 or newer.")
+end
+
+vim.g.mapleader = " "
+vim.g.maplocalleader = " "
+
 local lazypath = vim.fn.stdpath("data") .. "/lazy/lazy.nvim"
 if not (vim.uv or vim.loop).fs_stat(lazypath) then
-    vim.fn.system({
+    local output = vim.fn.system({
         "git",
         "clone",
         "--filter=blob:none",
         "https://github.com/folke/lazy.nvim.git",
-        "--branch=stable", -- latest stable release
+        "--branch=stable",
         lazypath,
     })
+    if vim.v.shell_error ~= 0 then
+        error("Could not install lazy.nvim:\n" .. output)
+    end
 end
 vim.opt.rtp:prepend(lazypath)
-vim.cmd("set number")
+
 require("vim-options")
--- Load pywal colors early
-pcall(function() vim.cmd("source ~/.cache/wal/colors-wal.vim") end)
+
+require("keymaps")
+
 require("lazy").setup("plugins")
+
+require("custom-colors")

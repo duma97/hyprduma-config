@@ -4,8 +4,8 @@ return {
         require'tabline'.setup {
             enable = true,
             options = {
-                section_separators = { '', ''},
-                component_separators = {'|', "|"},
+                section_separators = { '', '' },
+                component_separators = { '', '' },
                 max_bufferline_percent = 80,
                 show_tabs_always = true,
                 show_devicons = true,
@@ -16,5 +16,5 @@ return {
             }
         }
     end,
-    dependencies = {'nvim-lualine/lualine.nvim', 'nvim-tree/nvim-web-devicons'}
+    dependencies = {'nvim-tree/nvim-web-devicons'}
 }

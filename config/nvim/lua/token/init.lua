@@ -1,0 +1,25 @@
+local M = {}
+
+function M.load()
+  vim.cmd('hi clear')
+  vim.g.colors_name = 'token'
+
+  -- Clear cached modules so palette/groups pick up the new background
+  for key in pairs(package.loaded) do
+    if key == 'token' or key:match('^token%.') or key == 'lualine.themes.token' then
+      package.loaded[key] = nil
+    end
+  end
+
+  local p = require('token.palette')(vim.o.background)
+  local groups = require('token.groups')(p)
+
+  for group, hl in pairs(groups) do
+    vim.api.nvim_set_hl(0, group, hl)
+  end
+
+  local is_dark = vim.o.background == 'dark'
+  require('token.terminal').set(p, is_dark)
+end
+
+return M

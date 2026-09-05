@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
+"""Install the Arch desktop config after dependencies and theme generation succeed."""
 
 import configparser
+import importlib.util
+import io
+import os
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 # Colors
@@ -20,25 +26,38 @@ CYAN = "\033[36m"
 REPO_URL = "https://github.com/duma799/hyprduma-config.git"
 
 PACMAN_PACKAGES = [
-    "hyprland",
-    "hyprlock",
-    "hyprshot",
-    "wlogout",
-    "kitty",
-    "waybar",
-    "swaybg",
-    "waypaper",
-    "wofi",
-    "nautilus",
-    "wireplumber",
-    "pipewire-pulse",
-    "brightnessctl",
-    "playerctl",
-    "adwaita-cursors",
-    "python-pywal",
-    "fastfetch",
-    "neovim",
+    "git", "hyprland", "hyprlock", "hyprshot", "kitty", "swaybg",
+    "wofi", "nautilus", "wireplumber", "pipewire-pulse", "brightnessctl",
+    "playerctl", "adwaita-cursors", "ttf-jetbrains-mono-nerd", "htop",
 ]
+AUR_PACKAGES = ["wlogout", "waypaper", "python-pywal"]
+NVIM_PACKAGES = [
+    "neovim", "ripgrep", "fd", "lazygit", "tree-sitter-cli", "base-devel",
+    "nodejs", "npm", "unzip", "curl", "tar", "gzip", "wl-clipboard", "python-debugpy",
+]
+REQUIRED_COMMANDS = [
+    "git", "Hyprland", "hyprctl", "hyprlock", "hyprshot", "kitty",
+    "swaybg", "wofi", "nautilus", "wpctl", "pactl", "brightnessctl", "playerctl",
+    "htop", "wlogout", "waypaper", "wal", "bash", "python3", "pgrep",
+]
+NVIM_COMMANDS = [
+    "nvim", "rg", "fd", "lazygit", "tree-sitter", "make", "cc", "node", "npm",
+    "unzip", "curl", "tar", "gzip", "wl-copy", "wl-paste",
+]
+REQUIRED_FILES = [
+    "hyprland.lua", "scripts/theme.py", "scripts/pywal.sh", "scripts/waypaper-hook.sh",
+    "scripts/sync-caelestia-wallpaper.sh", "scripts/monitor-handler.py",
+    "config/wal/templates/hyprland-colors.lua", "config/wal/templates/caelestia-scheme.json",
+    "config/kitty/kitty.conf", "config/hyprlock/hyprlock.conf", "wallpapers/sakura.jpg",
+]
+
+
+class InstallError(RuntimeError):
+    """A required step failed; do not activate the configuration."""
+
+
+def config_home():
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
 
 
 def print_step(num, total, msg):
@@ -67,368 +86,404 @@ def ask_yn(prompt, default=True):
         with open("/dev/tty") as tty:
             sys.stdout.write(f"  {MAGENTA}?{RESET} {prompt}{suffix}")
             sys.stdout.flush()
-            answer = tty.readline().strip().lower()
-    except (OSError, KeyboardInterrupt):
-        print()
-        sys.exit(1)
+            answer = tty.readline()
+    except OSError as exc:
+        raise InstallError("An interactive terminal is required for installer choices") from exc
     if not answer:
-        return default
-    return answer in ("y", "yes")
+        raise InstallError("No answer received from the terminal")
+    answer = answer.strip().lower()
+    return default if not answer else answer in ("y", "yes")
 
 
-def run(cmd, capture=False, check=True, **kwargs):
-    """Run a shell command. Returns stdout string if capture=True (None on failure),
-    or bool success if capture=False."""
-    result = subprocess.run(
-        cmd, shell=True, capture_output=capture, text=capture, **kwargs
-    )
+def run(cmd, capture=False, **kwargs):
+    """Run an argument array without a shell; return output or success status."""
+    try:
+        result = subprocess.run(cmd, capture_output=capture, text=True, **kwargs)
+    except OSError:
+        return None if capture else False
     if capture:
-        if check and result.returncode != 0:
-            return None
-        return result.stdout.strip()
-    if check:
-        return result.returncode == 0
-    return True
+        return result.stdout.strip() if result.returncode == 0 else None
+    return result.returncode == 0
+
+
+def require_run(cmd, message, **kwargs):
+    if not run(cmd, **kwargs):
+        raise InstallError(message)
 
 
 def cmd_exists(name):
     return shutil.which(name) is not None
 
 
+def unique_backup_path(path):
+    backup = path.with_name(path.name + ".backup")
+    suffix = 1
+    while backup.exists() or backup.is_symlink():
+        backup = path.with_name(f"{path.name}.backup.{suffix}")
+        suffix += 1
+    return backup
+
+
+def preserve(path):
+    backup = unique_backup_path(path)
+    path.rename(backup)
+    print_warn(f"Backed up {path} -> {backup}")
+    return backup
+
+
 def find_repo_dir():
-    cwd = Path.cwd()
-    if (cwd / "hyprland.conf").exists() and (cwd / "scripts" / "pywal.sh").exists():
-        return cwd
-    script_dir = Path(__file__).resolve().parent
-    if (script_dir / "hyprland.conf").exists() and (script_dir / "scripts" / "pywal.sh").exists():
-        return script_dir
+    for candidate in (Path.cwd(), Path(__file__).resolve().parent):
+        if (candidate / "scripts").is_dir() and any(
+            (candidate / name).is_file() for name in ("hyprland.lua", "hyprland.conf")
+        ):
+            return candidate
     return None
 
 
 def check_arch():
-    if not Path("/etc/arch-release").exists():
-        print_err("This installer is designed for Arch Linux (or Arch-based distros).")
-        if not ask_yn("Continue anyway?", default=False):
-            sys.exit(1)
+    if not Path("/etc/arch-release").exists() or not cmd_exists("pacman"):
+        raise InstallError("This installer requires Arch Linux or an Arch-based distribution")
+    if os.geteuid() == 0:
+        raise InstallError("Run as your normal user, with sudo available for package installation")
+    if not cmd_exists("sudo"):
+        raise InstallError("sudo is required to install system packages")
+
+
+def check_version(command, pattern, minimum, label):
+    output = run(command, capture=True)
+    match = re.search(pattern, output or "")
+    if match is None:
+        raise InstallError(f"Cannot read {label} version; install a supported version before continuing")
+    version = tuple(int(part or 0) for part in match.groups())
+    if version < minimum:
+        required = ".".join(map(str, minimum))
+        raise InstallError(f"{label} {required} or newer is required")
+
+
+def check_lua_config_support():
+    check_version(["Hyprland", "--version"], r"\bHyprland\s+v?(\d+)\.(\d+)(?:\.(\d+))?\b",
+                  (0, 55, 0), "Hyprland")
+    print_ok("Installed Hyprland supports Lua configuration")
 
 
 def install_aur_helpers():
-    has_yay = cmd_exists("yay")
-    has_paru = cmd_exists("paru")
-
-    if has_yay and has_paru:
-        print_ok("yay and paru are already installed")
-        return
-
-    if has_yay:
-        print_ok("yay is already installed")
-    if has_paru:
-        print_ok("paru is already installed")
-
-    missing = []
-    if not has_yay:
-        missing.append("yay")
-    if not has_paru:
-        missing.append("paru")
-
-    if not ask_yn(f"Install AUR helper(s): {', '.join(missing)}?"):
-        print_warn("Skipping AUR helpers (caelestia-shell will require manual install)")
-        return
-
-    run("sudo pacman -S --needed --noconfirm git base-devel")
-
-    for helper in missing:
-        print_info(f"Building {helper} from AUR...")
-        build_dir = Path(f"/tmp/{helper}-build")
-        if build_dir.exists():
-            shutil.rmtree(build_dir)
-        ok = run(
-            f"git clone https://aur.archlinux.org/{helper}.git {build_dir}"
-            f" && cd {build_dir} && makepkg -si --noconfirm"
-        )
-        if ok:
-            print_ok(f"{helper} installed")
-        else:
-            print_err(f"Failed to install {helper} - you can install it manually later")
-        if build_dir.exists():
-            shutil.rmtree(build_dir)
+    """Choose one installed helper; bootstrap only yay when neither is available."""
+    for helper in ("yay", "paru"):
+        if cmd_exists(helper):
+            print_ok(f"Using {helper} for AUR packages")
+            return helper
+    if not ask_yn("Build yay to install the required AUR packages?"):
+        raise InstallError("Required AUR packages need yay or paru; install them manually and rerun")
+    require_run(["sudo", "pacman", "-S", "--needed", "--noconfirm", "git", "base-devel"],
+                "Could not install prerequisites for yay")
+    with tempfile.TemporaryDirectory(prefix="hyprduma-yay-") as directory:
+        source = Path(directory) / "yay"
+        require_run(["git", "clone", "https://aur.archlinux.org/yay.git", str(source)],
+                    "Could not clone yay")
+        require_run(["makepkg", "-si", "--noconfirm"], "Could not build/install yay", cwd=source)
+    if not cmd_exists("yay"):
+        raise InstallError("yay build completed but yay is unavailable on PATH")
+    return "yay"
 
 
-def install_packages():
-    print_info(f"Packages: {' '.join(PACMAN_PACKAGES)}")
+def install_packages(include_nvim=True, include_fastfetch=True):
+    packages = list(PACMAN_PACKAGES)
+    if include_nvim:
+        packages.extend(NVIM_PACKAGES)
+    if include_fastfetch:
+        packages.append("fastfetch")
+    print_info(f"Official packages: {' '.join(packages)}")
+    print_info(f"AUR packages: {' '.join(AUR_PACKAGES)}")
+    if not ask_yn("Install required official and AUR packages?"):
+        print_info("Package installation skipped; installed dependencies will still be checked")
+        return False
+    require_run(["sudo", "pacman", "-S", "--needed", "--noconfirm", *packages],
+                "Required official package installation failed; configs were not replaced")
+    helper = install_aur_helpers()
+    require_run([helper, "-S", "--needed", "--noconfirm", *AUR_PACKAGES],
+                "Required AUR package installation failed; configs were not replaced")
+    print_ok("Required packages installed")
+    return True
 
-    if not ask_yn("Install required packages via pacman?"):
-        print_warn("Skipping package installation")
-        return
 
-    pkg_str = " ".join(PACMAN_PACKAGES)
-    if not run(f"sudo pacman -S --needed --noconfirm {pkg_str}"):
-        print_err("Some packages failed to install - check output above")
-    else:
-        print_ok("All packages installed")
+def caelestia_installed():
+    # Match Quickshell's named-config lookup used by the monitor handler.
+    if not cmd_exists("qs"):
+        return False
+    roots = [config_home()]
+    roots.extend(Path(item) for item in os.environ.get("XDG_CONFIG_DIRS", "/etc/xdg").split(":") if item)
+    return any((root / "quickshell/caelestia/shell.qml").is_file() for root in roots)
 
 
 def install_caelestia():
-    already_installed = cmd_exists("caelestia")
-
-    if already_installed:
-        print_ok("Caelestia shell is already installed")
-    else:
-        if not cmd_exists("yay") and not cmd_exists("paru"):
-            print_warn(
-                "No AUR helper found - skipping Caelestia (install manually: yay -S caelestia-shell)"
-            )
-            return
-
-        if not ask_yn("Install Caelestia Shell (recommended for dynamic theming)?"):
-            print_warn("Skipping Caelestia shell")
-            return
-
-        helper = "yay" if cmd_exists("yay") else "paru"
-        if run(f"{helper} -S --noconfirm caelestia-shell"):
-            print_ok("Caelestia shell installed")
-        else:
-            print_err(
-                "Failed to install Caelestia - you can try manually: yay -S caelestia-shell"
-            )
-            return
-
-    state_dir = Path.home() / ".local" / "state" / "caelestia"
-    wallpaper_dir = state_dir / "wallpaper"
-    wallpaper_dir.mkdir(parents=True, exist_ok=True)
-    print_ok("Created Caelestia state directories (~/.local/state/caelestia/)")
-
-    if run("pgrep -x Hyprland", capture=True) is not None:
-        print_info("Hyprland detected, launching Caelestia shell...")
-        run("caelestia shell -d &", check=False)
-        print_ok("Caelestia shell launched")
-    else:
-        print_info("Caelestia will start automatically on next Hyprland session")
+    if caelestia_installed():
+        print_ok("Quickshell runtime and Caelestia shell are installed")
+        return True
+    if not ask_yn("Install optional Caelestia Shell (panel, notifications, and dynamic theming)?"):
+        print_warn("Caelestia skipped; its panel and notification center will be unavailable")
+        return False
+    try:
+        helper = install_aur_helpers()
+        require_run([helper, "-S", "--needed", "--noconfirm", "caelestia-shell"],
+                    "Caelestia package installation failed")
+        if not caelestia_installed():
+            raise InstallError("Quickshell runtime or a discoverable Caelestia shell.qml is missing")
+    except InstallError as exc:
+        print_warn(f"Optional Caelestia unavailable: {exc}")
+        return False
+    print_ok("Caelestia installed; it will start with your next Hyprland session")
+    return True
 
 
-def make_symlink(src: Path, dst: Path):
-    """Create symlink dst -> src, backing up any existing non-symlink at dst."""
-    if dst.is_symlink():
-        if dst.resolve() == src.resolve():
-            return  # already correct
-        dst.unlink()
-    elif dst.exists():
-        backup = dst.parent / (dst.name + ".backup")
-        if backup.exists():
-            shutil.rmtree(str(backup)) if backup.is_dir() else backup.unlink()
-        shutil.move(str(dst), str(backup))
-        print_warn(f"Backed up {dst} -> {backup}")
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.symlink_to(src)
+def validate_repo(repo, include_nvim=True, include_fastfetch=True):
+    required = list(REQUIRED_FILES)
+    if include_nvim:
+        required.extend(["config/nvim/init.lua", "config/nvim/lazy-lock.json"])
+    if include_fastfetch:
+        required.extend(["config/fastfetch/config.jsonc", "config/fastfetch/ascii/arch.txt"])
+    missing = [name for name in required if not (repo / name).is_file()]
+    if missing:
+        raise InstallError("Repository is incomplete: " + ", ".join(missing))
+    for name in ("scripts/pywal.sh", "scripts/waypaper-hook.sh", "scripts/sync-caelestia-wallpaper.sh"):
+        if not os.access(repo / name, os.X_OK):
+            raise InstallError(f"Required script is not executable: {repo / name}")
+
+
+def ensure_git():
+    if cmd_exists("git"):
+        return
+    if not ask_yn("Git is required to clone the repository. Install git?"):
+        raise InstallError("Cannot clone the repository without git")
+    require_run(["sudo", "pacman", "-S", "--needed", "--noconfirm", "git"],
+                "Git installation failed")
+    if not cmd_exists("git"):
+        raise InstallError("git is unavailable after installation")
 
 
 def clone_repo():
-    repo_dir = find_repo_dir()
-    if repo_dir:
-        print_ok(f"Using repo at: {repo_dir}")
-        return repo_dir
-
-    clone_target = Path.home() / "hyprduma-config"
-    print_info(f"Cloning to {clone_target}")
-
-    if clone_target.exists():
-        if (clone_target / "hyprland.conf").exists():
-            print_ok("Repo already exists, using it")
-            return clone_target
-        if ask_yn(f"{clone_target} exists but looks wrong. Remove and re-clone?"):
-            shutil.rmtree(clone_target)
-        else:
-            print_err("Cannot proceed without a valid repo directory")
-            sys.exit(1)
-
-    if run(f"git clone {REPO_URL} {clone_target}"):
-        print_ok(f"Repository cloned to {clone_target}")
-        return clone_target
+    repo = find_repo_dir()
+    if repo:
+        print_ok(f"Using repo at: {repo}")
+        return repo
+    target = Path.home() / "hyprduma-config"
+    try:
+        validate_repo(target)
+    except InstallError:
+        pass
     else:
-        print_err("Failed to clone repository")
-        sys.exit(1)
+        print_ok(f"Using existing repository at {target}")
+        return target
+    ensure_git()
+    # Keep any old checkout untouched until a complete replacement has been cloned.
+    with tempfile.TemporaryDirectory(prefix=".hyprduma-clone-", dir=target.parent) as directory:
+        staged = Path(directory) / "repo"
+        require_run(["git", "clone", REPO_URL, str(staged)], "Repository clone failed; existing checkout is unchanged")
+        validate_repo(staged)
+        backup = preserve(target) if target.exists() or target.is_symlink() else None
+        try:
+            staged.rename(target)
+        except OSError:
+            if backup is not None:
+                backup.rename(target)
+            raise
+    print_ok(f"Repository cloned to {target}")
+    return target
 
 
-def backup_configs():
-    # Backups are now handled per-item in make_symlink; this step is a no-op.
-    print_ok("Backups handled automatically during symlinking")
+def make_symlink(src, dst):
+    """Create dst -> src, preserving every previous destination under a unique name."""
+    if not src.exists():
+        raise InstallError(f"Cannot link missing source: {src}")
+    if dst.is_symlink() and dst.resolve() == src.resolve():
+        return
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    backup = preserve(dst) if dst.exists() or dst.is_symlink() else None
+    try:
+        dst.symlink_to(src)
+    except OSError:
+        if backup is not None:
+            backup.rename(dst)
+        raise
+
+
+def write_preserving(path, content):
+    """Replace a text config atomically, retaining the original including symlinks."""
+    if path.is_file() and path.read_text() == content:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=".hyprduma-", delete=False) as stream:
+        temporary = Path(stream.name)
+        stream.write(content)
+    backup = None
+    try:
+        if path.exists() or path.is_symlink():
+            backup = preserve(path)
+        temporary.replace(path)
+    except OSError:
+        if backup is not None:
+            backup.rename(path)
+        raise
+    finally:
+        temporary.unlink(missing_ok=True)
+    return True
+
+
+def prepare_waypaper_config(repo):
+    config = configparser.ConfigParser(interpolation=None)
+    ini = config_home() / "waypaper" / "config.ini"
+    if ini.exists():
+        with ini.open() as stream:
+            config.read_file(stream)
+    if not config.has_section("Settings"):
+        config.add_section("Settings")
+    settings = config["Settings"]
+    if not settings.get("backend"):
+        settings["backend"] = "swaybg"
+    if not settings.get("folder"):
+        settings["folder"] = str(repo / "wallpapers")
+    # Use the coordinator's wallpaper parser so multi-monitor settings behave identically.
+    spec = importlib.util.spec_from_file_location("hyprduma_theme", repo / "scripts" / "theme.py")
+    theme = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = theme
+    spec.loader.exec_module(theme)
+    try:
+        wallpaper = theme.configured_wallpaper()
+    except theme.ThemeError as exc:
+        raise InstallError(str(exc)) from exc
+    initialize_wallpaper = wallpaper is None
+    if initialize_wallpaper:
+        wallpaper = repo / "wallpapers" / "sakura.jpg"
+        settings["wallpaper"] = str(wallpaper)
+    hook = str(config_home() / "hypr" / "scripts" / "waypaper-hook.sh")
+    # Waypaper escapes the substitution itself; surrounding quotes break space paths.
+    settings["post_command"] = shlex.quote(hook) + ' $wallpaper'
+    state_setup = None
+    if config.getboolean("Settings", "use_xdg_state", fallback=False):
+        state_path = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state") / "waypaper/state.ini"
+        state = configparser.ConfigParser(interpolation=None)
+        if state_path.exists():
+            with state_path.open() as stream:
+                state.read_file(stream)
+        if not state.has_section("State"):
+            state.add_section("State")
+        if not state["State"].get("backend"):
+            state["State"]["backend"] = settings["backend"]
+        if initialize_wallpaper or not state["State"].get("wallpaper"):
+            state["State"]["wallpaper"] = settings.get("wallpaper") or str(wallpaper)
+        state_setup = (state_path, state)
+    return config, Path(wallpaper), state_setup
+
+
+def preflight(repo, include_nvim=True, include_fastfetch=True):
+    validate_repo(repo, include_nvim, include_fastfetch)
+    commands = list(REQUIRED_COMMANDS)
+    if include_nvim:
+        commands.extend(NVIM_COMMANDS)
+    if include_fastfetch:
+        commands.append("fastfetch")
+    missing = [name for name in commands if not cmd_exists(name)]
+    if missing:
+        raise InstallError("Required commands are missing: " + ", ".join(missing))
+    check_lua_config_support()
+    if include_nvim:
+        check_version(["nvim", "--version"], r"NVIM v(\d+)\.(\d+)\.(\d+)", (0, 12, 0), "Neovim")
+        check_version(["tree-sitter", "--version"], r"tree-sitter (\d+)\.(\d+)\.(\d+)",
+                      (0, 26, 1), "tree-sitter-cli")
+        require_run(["python3", "-c", "import debugpy"], "python-debugpy is required for Neovim's Python debugger")
+    require_run(["python3", str(repo / "scripts" / "theme.py"), "--templates-dir",
+                 str(repo / "config" / "wal" / "templates"), "--preflight"],
+                "Theme prerequisite/template validation failed")
+    config, wallpaper, state = prepare_waypaper_config(repo)
+    prepare_bashrc(config_home())
+    require_run(["python3", str(repo / "scripts" / "theme.py"), "--templates-dir",
+                 str(repo / "config" / "wal" / "templates"), "--generate-only", str(wallpaper)],
+                "Initial theme generation failed; configs were not replaced")
+    return config, state
 
 
 def install_hypr_config(repo):
-    hypr_dir = Path.home() / ".config" / "hypr"
-    hypr_dir.mkdir(parents=True, exist_ok=True)
+    hypr = config_home() / "hypr"
+    hypr.mkdir(parents=True, exist_ok=True)
+    make_symlink(repo / "config" / "hyprlock" / "hyprlock.conf", hypr / "hyprlock.conf")
+    make_symlink(repo / "wallpapers", Path.home() / "wallpapers")
+    (Path.home() / "Pictures" / "Screenshots").mkdir(parents=True, exist_ok=True)
+    legacy = hypr / "hyprland.conf"
+    legacy_backup = preserve(legacy) if legacy.exists() or legacy.is_symlink() else None
+    try:
+        make_symlink(repo / "hyprland.lua", hypr / "hyprland.lua")
+    except (InstallError, OSError):
+        if legacy_backup is not None:
+            legacy_backup.rename(legacy)
+        raise
+    print_ok("Installed Hyprland, lock screen, and wallpaper links")
 
-    make_symlink(repo / "hyprland.conf", hypr_dir / "hyprland.conf")
-    print_ok("Symlinked hyprland.conf")
 
-    screenshots = Path.home() / "Pictures" / "Screenshots"
-    screenshots.mkdir(parents=True, exist_ok=True)
-    print_ok(f"Created {screenshots}")
+def install_pywal(repo, waypaper_config, waypaper_state=None):
+    config_dir = config_home()
+    make_symlink(repo / "config" / "wal" / "templates", config_dir / "wal" / "templates")
+    make_symlink(repo / "scripts", config_dir / "hypr" / "scripts")
+    make_symlink(repo / "config" / "kitty", config_dir / "kitty")
+    stream = io.StringIO()
+    waypaper_config.write(stream)
+    write_preserving(config_dir / "waypaper" / "config.ini", stream.getvalue())
+    if waypaper_state is not None:
+        state_path, state = waypaper_state
+        stream = io.StringIO()
+        state.write(stream)
+        write_preserving(state_path, stream.getvalue())
+    update_bashrc(config_dir)
+    print_ok("Installed pywal templates, scripts, Kitty, and Waypaper integration")
 
-    wallpapers_src = repo / "wallpapers"
-    if wallpapers_src.exists():
-        make_symlink(wallpapers_src, Path.home() / "wallpapers")
-        print_ok("Symlinked ~/wallpapers/ -> repo/wallpapers/")
 
-
-def install_pywal(repo):
-    home = Path.home()
-    hypr_dir = home / ".config" / "hypr"
-    hypr_dir.mkdir(parents=True, exist_ok=True)
-
-    # Pywal templates
-    templates_src = repo / "config" / "wal" / "templates"
-    if templates_src.exists():
-        (home / ".config" / "wal").mkdir(parents=True, exist_ok=True)
-        make_symlink(templates_src, home / ".config" / "wal" / "templates")
-        print_ok("Symlinked pywal templates")
+def prepare_bashrc(config_dir):
+    bashrc = Path.home() / ".bashrc"
+    content = bashrc.read_text() if bashrc.exists() else ""
+    script = shlex.quote(str(config_dir / "hypr" / "scripts" / "pywal.sh"))
+    snippet = (
+        "# BEGIN hyprduma pywal\n"
+        "# Import pywal colorscheme from cache\n"
+        '[ -f "${XDG_CACHE_HOME:-$HOME/.cache}/wal/sequences" ] && cat "${XDG_CACHE_HOME:-$HOME/.cache}/wal/sequences"\n'
+        'source "${XDG_CACHE_HOME:-$HOME/.cache}/wal/colors-tty.sh" 2>/dev/null\n'
+        f"pywal() {{ {script} \"$@\"; }}\n"
+        "# END hyprduma pywal\n"
+    )
+    legacy = (
+        "# Import pywal colorscheme from cache\n"
+        "(cat ~/.cache/wal/sequences &)\n"
+        "\n# To add support for TTYs (optional)\n"
+        "source ~/.cache/wal/colors-tty.sh 2>/dev/null\n"
+        "\n# Alias for pywal color generator\n"
+        "alias pywal='~/.config/hypr/scripts/pywal.sh'\n"
+    )
+    if "# BEGIN hyprduma pywal\n" in content:
+        updated, count = re.subn(r"(?m)^# BEGIN hyprduma pywal\n.*?^# END hyprduma pywal(?:\n|$)",
+                                lambda match: snippet, content, flags=re.DOTALL)
+        if count != 1:
+            raise InstallError("The managed pywal block in .bashrc is incomplete or duplicated")
+    elif legacy in content:
+        updated = content.replace(legacy, snippet, 1)
+    elif "# Import pywal colorscheme from cache" in content:
+        print_warn("Kept a custom .bashrc pywal block; update its paths manually if using XDG directories")
+        return
     else:
-        print_err("config/wal/templates not found in repo")
+        updated = content + "\n" + snippet
+    return updated
 
-    # Scripts
-    scripts_src = repo / "scripts"
-    scripts_dir = hypr_dir / "scripts"
-    if scripts_src.exists():
-        make_symlink(scripts_src, scripts_dir)
-        print_ok("Symlinked scripts -> ~/.config/hypr/scripts/")
 
-    # Waypaper hook
-    hook_cmd = str(scripts_dir / "waypaper-hook.sh")
-    waypaper_config_dir = home / ".config" / "waypaper"
-    waypaper_config_dir.mkdir(parents=True, exist_ok=True)
-    waypaper_ini = waypaper_config_dir / "config.ini"
-
-    config = configparser.ConfigParser()
-    if waypaper_ini.exists():
-        config.read(str(waypaper_ini))
-
-    if not config.has_section("Settings"):
-        config.add_section("Settings")
-
-    existing_post = config.get("Settings", "post_command", fallback="")
-    if existing_post and existing_post != hook_cmd:
-        print_warn(f"Waypaper already has post_command: {existing_post}")
-        if ask_yn("Replace with waypaper-hook.sh?"):
-            config.set("Settings", "post_command", hook_cmd)
-            with open(str(waypaper_ini), "w") as f:
-                config.write(f)
-            print_ok("Updated waypaper post_command to use waypaper-hook.sh")
-        else:
-            print_info(
-                f"To add manually: set post_command = {hook_cmd} in ~/.config/waypaper/config.ini"
-            )
-    else:
-        config.set("Settings", "post_command", hook_cmd)
-        with open(str(waypaper_ini), "w") as f:
-            config.write(f)
-        print_ok("Registered waypaper-hook.sh as waypaper post_command")
-
-    # pywal.sh is already in ~/.config/hypr/scripts/pywal.sh
-
-    # Kitty
-    kitty_src = repo / "config" / "kitty"
-    if kitty_src.exists():
-        make_symlink(kitty_src, home / ".config" / "kitty")
-        print_ok("Symlinked kitty config")
-
-    # Bashrc
-    bashrc = home / ".bashrc"
-    pywal_marker = "# Import pywal colorscheme from cache"
-    already_configured = False
-
-    if bashrc.exists():
-        content = bashrc.read_text()
-        if pywal_marker in content:
-            already_configured = True
-
-    if already_configured:
-        print_ok("~/.bashrc already has pywal integration")
-    else:
-        snippet = (
-            "\n# Import pywal colorscheme from cache\n"
-            "(cat ~/.cache/wal/sequences &)\n"
-            "\n# To add support for TTYs (optional)\n"
-            "source ~/.cache/wal/colors-tty.sh 2>/dev/null\n"
-            "\n# Alias for pywal color generator\n"
-            "alias pywal='~/.config/hypr/scripts/pywal.sh'\n"
-        )
-        with open(bashrc, "a") as f:
-            f.write(snippet)
-        print_ok("Added pywal integration and alias to ~/.bashrc")
-
-    # Initial colors
-    wallpaper = Path.home() / "wallpapers" / "sakura.jpg"
-    if not wallpaper.exists():
-        # Fallback
-        wp_dir = Path.home() / "wallpapers"
-        if wp_dir.exists():
-            for ext in ("*.jpg", "*.png", "*.jpeg"):
-                found = list(wp_dir.glob(ext))
-                if found:
-                    wallpaper = found[0]
-                    break
-
-    if wallpaper.exists() and cmd_exists("wal"):
-        print_info(f"Generating pywal colors from {wallpaper.name}...")
-        run(f'wal -i {shlex.quote(str(wallpaper))}')
-        print_ok("Generated initial pywal color scheme")
-
-        pywal_script = scripts_dir / "pywal.sh"
-        if pywal_script.exists():
-            if run(f'bash {shlex.quote(str(pywal_script))}'):
-                print_ok("Applied pywal colors to all components")
-            else:
-                print_warn("pywal script had errors (normal if Hyprland isn't running yet)")
-    elif not cmd_exists("wal"):
-        print_warn(
-            "pywal (wal) not found - install python-pywal and run: wal -i <wallpaper> && pywal"
-        )
-    else:
-        print_warn(
-            "No wallpaper found - run manually: wal -i <wallpaper> && pywal"
-        )
+def update_bashrc(config_dir):
+    content = prepare_bashrc(config_dir)
+    if content is not None:
+        write_preserving(Path.home() / ".bashrc", content)
 
 
 def install_fastfetch_config(repo):
-    home = Path.home()
-    fastfetch_src = repo / "config" / "fastfetch"
-
-    if not fastfetch_src.exists():
-        print_warn("fastfetch/ directory not found in repo - skipping")
-        return
-
-    if not ask_yn("Install fastfetch config?"):
-        print_warn("Skipping fastfetch config")
-        return
-
-    make_symlink(fastfetch_src, home / ".config" / "fastfetch")
-
-    # Fix hardcoded home path in the repo file if needed
-    config_file = fastfetch_src / "config.jsonc"
-    if config_file.exists():
-        content = config_file.read_text()
-        fixed = content.replace("/home/duma/", str(home) + "/")
-        if fixed != content:
-            config_file.write_text(fixed)
-            print_ok("Fixed fastfetch config paths for current user")
-
-    print_ok("Symlinked fastfetch config -> ~/.config/fastfetch/")
+    make_symlink(repo / "config" / "fastfetch", config_home() / "fastfetch")
+    print_ok("Installed Fastfetch config")
 
 
 def install_nvim_config(repo):
-    home = Path.home()
-    nvim_src = repo / "config" / "nvim"
-
-    if not nvim_src.exists():
-        print_warn("nvim/ directory not found in repo - skipping")
-        return
-
-    if not ask_yn("Install Neovim config?"):
-        print_warn("Skipping Neovim config")
-        return
-
-    make_symlink(nvim_src, home / ".config" / "nvim")
-    print_ok("Symlinked Neovim config -> ~/.config/nvim/")
+    make_symlink(repo / "config" / "nvim", config_home() / "nvim")
+    print_ok("Installed Neovim config")
 
 
 def print_banner():
@@ -442,82 +497,56 @@ def print_banner():
 """)
 
 
-def print_post_install():
+def print_post_install(status):
+    print(f"\n{BOLD}{GREEN}Required configuration installed successfully.{RESET}")
+    for name, installed in status.items():
+        print_info(f"{name}: {'installed/available' if installed else 'skipped/unavailable'}")
+    hypr = config_home() / "hypr"
     print(f"""
-{BOLD}{GREEN}Installation complete!{RESET}
+Next steps:
+  1. Edit app preferences, monitors, and workspaces in {hypr / 'hyprland.lua'}.
+  2. Restart the Hyprland session to load the new monitor handler (start-hyprland).
+     Later config-only edits can be applied with hyprctl reload.
+  3. Select wallpapers with Waypaper (SUPER + W); the hook updates colors automatically.
+     Manual theme update: {hypr / 'scripts' / 'pywal.sh'} /path/to/wallpaper.jpg
 
-{BOLD}Next steps:{RESET}
-  {CYAN}1.{RESET} Edit your app preferences in ~/.config/hypr/hyprland.conf (lines 27-34):
-     $terminal, $fileManager, $menu, $browser, etc.
-
-  {CYAN}2.{RESET} Adjust monitor config (lines 4-18) if your setup differs.
-
-  {CYAN}3.{RESET} Start Hyprland from TTY:
-     $ {BOLD}Hyprland{RESET}
-
-     Or if already running, reload with: {BOLD}SUPER + SHIFT + R{RESET}
-
-  {CYAN}4.{RESET} Change wallpaper + colors anytime:
-     $ wal -i ~/path/to/wallpaper.jpg && pywal
-     Or use waypaper GUI ({BOLD}SUPER + W{RESET}) - colors auto-apply via hook
-
-  {CYAN}5.{RESET} Try {BOLD}fastfetch{RESET} in your terminal to see system info with custom styling
-
-{BOLD}Backups:{RESET} Original configs saved as ~/.config/<name>.backup
-{BOLD}Docs:{RESET}    See KEYBINDS.md for all keyboard shortcuts
+Existing configs and old checkouts are preserved as .backup, .backup.1, etc.
+The desktop has not been launched or reloaded by this installer.
+See docs/KEYBINDS.md for shortcuts and docs/README.md for optional applications.
 """)
 
 
 def main():
     print_banner()
-
     check_arch()
-
-    total = 9
-    step = 0
-
-    step += 1
-    print_step(step, total, "AUR Helpers (yay/paru)")
-    install_aur_helpers()
-
-    step += 1
-    print_step(step, total, "Install Required Packages")
-    install_packages()
-
-    step += 1
-    print_step(step, total, "Install Caelestia Shell")
-    install_caelestia()
-
-    step += 1
-    print_step(step, total, "Locate/Clone Repository")
+    include_nvim = ask_yn("Install the bundled Neovim config and its dependencies?")
+    include_fastfetch = ask_yn("Install the bundled Fastfetch config?")
+    print_step(1, 5, "Install required packages")
+    packages = install_packages(include_nvim, include_fastfetch)
+    print_step(2, 5, "Locate or clone repository")
     repo = clone_repo()
-
-    step += 1
-    print_step(step, total, "Backup Existing Configs")
-    backup_configs()
-
-    step += 1
-    print_step(step, total, "Install Configuration Files")
+    print_step(3, 5, "Validate prerequisites and generate initial theme")
+    waypaper = preflight(repo, include_nvim, include_fastfetch)
+    print_step(4, 5, "Optional Caelestia shell")
+    caelestia = install_caelestia()
+    print_step(5, 5, "Activate configuration with backups")
+    install_pywal(repo, *waypaper)
+    if include_fastfetch:
+        install_fastfetch_config(repo)
+    if include_nvim:
+        install_nvim_config(repo)
     install_hypr_config(repo)
-
-    step += 1
-    print_step(step, total, "Setup Pywal Integration")
-    install_pywal(repo)
-
-    step += 1
-    print_step(step, total, "Install Fastfetch Config")
-    install_fastfetch_config(repo)
-
-    step += 1
-    print_step(step, total, "Install Neovim Config")
-    install_nvim_config(repo)
-
-    print_post_install()
+    print_post_install({"Package installation": packages, "Caelestia": caelestia,
+                        "Fastfetch config": include_fastfetch, "Neovim config": include_nvim})
 
 
 if __name__ == "__main__":
     try:
         main()
+    except (InstallError, OSError, configparser.Error) as exc:
+        print_err(str(exc))
+        print_warn("Installation did not complete. Review the error and any backups before retrying.")
+        sys.exit(1)
     except KeyboardInterrupt:
         print(f"\n{YELLOW}Interrupted by user{RESET}")
         sys.exit(130)

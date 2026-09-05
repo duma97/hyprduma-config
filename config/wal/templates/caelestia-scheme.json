@@ -1,7 +1,6 @@
 {{
     "name": "pywal",
     "flavour": "pywal",
-    "mode": "dark",
     "variant": "tonalspot",
     "colours": {{
         "primary_paletteKeyColor": "{color4.strip}",

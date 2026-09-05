@@ -2,21 +2,22 @@ return {
     "folke/snacks.nvim",
     priority = 1000,
     lazy = false,
-    ---@type snacks.Config
+
     opts = {
         bigfile = { enabled = true },
         indent = { enabled = true },
         input = { enabled = true },
         quickfile = { enabled = true },
         scroll = { enabled = true },
-        statuscolumn = { enabled = true },
+        statuscolumn = { enabled = false },
         words = { enabled = true },
     },
     keys = {
         { "<leader>z",  function() Snacks.zen() end, desc = "Toggle Zen Mode" },
         { "<leader>s",  function() Snacks.scratch() end, desc = "Toggle Scratch Buffer" },
         { "<leader>S",  function() Snacks.scratch.select() end, desc = "Select Scratch Buffer" },
-        { "<c-/>",      function() Snacks.terminal() end, desc = "Toggle Terminal" },
+        { "<c-/>",      function() Snacks.terminal(nil, { cwd = vim.fn.getcwd(), win = { position = "bottom", height = 0.3 } }) end, desc = "Toggle Terminal", mode = { "n", "t" } },
+        { "<c-_>",      function() Snacks.terminal(nil, { cwd = vim.fn.getcwd(), win = { position = "bottom", height = 0.3 } }) end, desc = "Toggle Terminal", mode = { "n", "t" } },
         { "<leader>gB", function() Snacks.gitbrowse() end, desc = "Git Browse", mode = { "n", "v" } },
         { "<leader>gb", function() Snacks.git.blame_line() end, desc = "Git Blame Line" },
         { "<leader>gf", function() Snacks.lazygit.log_file() end, desc = "Lazygit Current File History" },
@@ -51,8 +52,8 @@ return {
                 _G.bt = function()
                     Snacks.debug.backtrace()
                 end
-                vim.print = _G.dd 
-                -- Create some toggle mappings
+                vim.print = _G.dd
+
                 Snacks.toggle.option("spell", { name = "Spelling" }):map("<leader>us")
                 Snacks.toggle.option("wrap", { name = "Wrap" }):map("<leader>uw")
             end,

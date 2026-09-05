@@ -10,10 +10,13 @@
 | `SUPER + P` | Poweroff |
 | `SUPER + RETURN` | Wlogout |
 | `SUPER + M` | Exit Hyprland |
-| `SUPER + L` | Lock screen |
+| `SUPER + L` | Caelestia lock, falling back to Hyprlock |
 | `SUPER + Z` | Toggle floating |
 | `SUPER + X` | Fullscreen |
 | `SUPER + O` | Toggle split direction |
+| `SUPER + SHIFT + O` | Toggle pseudo tiling for the focused window |
+| `SUPER + SHIFT + B` | Toggle blur |
+| `SUPER + N` | Toggle Caelestia sidebar (requires Caelestia) |
 
 ---
 
@@ -38,11 +41,11 @@
 
 | Keybind | Action |
 |---------|--------|
-| `ALT + ←/→/↑/↓` | Move focus |
+| `ALT + ←/→/↑/↓` or `ALT + H/L/K/J` | Move focus |
 | `ALT + TAB` | Cycle windows |
 | `SUPER + TAB` | Cycle windows backwards |
-| `ALT + CTRL + ←/→/↑/↓` | Resize window |
-| `ALT + SHIFT + ←/→/↑/↓` | Move window |
+| `ALT + CTRL + ←/→/↑/↓` or `ALT + CTRL + H/L/K/J` | Resize window |
+| `ALT + SHIFT + ←/→/↑/↓` or `ALT + SHIFT + H/L/K/J` | Move window |
 
 ---
 
@@ -60,9 +63,11 @@
 | Keybind | Action |
 |---------|--------|
 | `SUPER + SHIFT + [1-9, 0]` | Move & follow |
-| `SUPER + SHIFT + ←/→` | Move to prev/next & follow |
+| `SUPER + SHIFT + ←/→` or `SUPER + SHIFT + H/L` | Move to prev/next & follow |
 | `SUPER + CTRL + [1-9, 0]` | Move silently (don't follow) |
-| `SUPER + CTRL + ←/→` | Move to prev/next silently |
+| `SUPER + CTRL + ←/→` or `SUPER + CTRL + H/L` | Move to prev/next silently |
+
+Plain `CTRL + H/L` is available to applications, including Neovim split navigation.
 
 ---
 
@@ -111,8 +116,8 @@
 5. **Switch workspace**: `SUPER + [number]`
 
 ### Multi-Monitor Workflow
-- Workspaces 1-4 are on external monitor (HDMI-A-1)
-- Workspace 5 is on laptop screen (eDP-1)
+- Workspaces 1-4 are on external monitor (`DP-1`)
+- Workspaces 5-10 are on laptop screen (`eDP-1`)
 - Use `SUPER + SHIFT + [number]` to throw windows between monitors
 
 ### Screenshots
