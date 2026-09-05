@@ -82,3 +82,47 @@ Run these after installing on the intended Arch machine:
 
 Installer execution is intentionally separate from automated checks because it
 installs packages and replaces the selected user's configuration.
+
+## Arch terminal investigation — 2026-09-05
+
+Inspected experimental baseline `b21eaae` against the actual installation in
+`/home/duma/hyprduma-config`, which was still on **master at `1f9568f`**.
+An isolated `codex/experimental` worktree was used because live configuration
+symlinks point into the master checkout; switching it would immediately change
+active files and leave the old Hyprland config link dangling.
+
+Observed on this machine:
+
+- Bash reads `.bashrc` from `.bash_profile`. XDG config/cache/data overrides and
+  `KITTY_CONFIG_DIRECTORY` were unset. The legacy Bash block unconditionally
+  reads `~/.cache/wal/sequences`; the entire `~/.cache/wal` directory was absent.
+- `wal`, `python-pywal`, and `ttf-jetbrains-mono-nerd` were missing. Fontconfig
+  matched the requested Nerd Font to Nimbus Mono PS instead.
+- Kitty 0.48.2 reads `~/.config/kitty/kitty.conf` through a valid symlink into
+  master. Its parser accepts size 13 and opacity 0.8, with `JetBrains Mono` as
+  the font request, and reports the missing color include. This confirms config
+  discovery, but does not establish what an already-running window displays.
+- Package logs show the old installer's combined official/AUR package request
+  at 14:35, with no successful corresponding transaction. Subsequent Caelestia
+  transactions completed. Config links and shell edits were created around
+  14:57–14:58. The exact installer exit status was not retained; required
+  installation is incomplete regardless of any completion banner.
+- Existing Kitty backup directory is empty. The personal Hyprland Lua file and
+  legacy Hyprland link both exist; neither was replaced during this repair.
+
+Applied the experimental Bash migration with the original preserved as
+`~/.bashrc.backup`. Added alias removal before defining the replacement function,
+so sourcing the new block in an existing shell also works. A fresh interactive
+Bash loads the function without a missing-wal error. All **65 regression tests**,
+shell syntax checks, and Neovim/Hyprland harnesses pass on Arch.
+
+Package installation requires a local sudo password; the attempted font install
+was cancelled at that prompt. No font package or real palette was installed by
+this investigation. To complete installation, run `python3 install.py` from the
+experimental worktree in a local terminal, accepting the required dependencies.
+It checks packages and generates the palette before activating config links,
+and preserves existing destinations and numbered backups. Keep that worktree
+at a permanent path before installation, since installed symlinks depend on it.
+Then verify `fc-match 'JetBrainsMono Nerd Font'`, the generated files under
+`${XDG_CACHE_HOME:-$HOME/.cache}/wal`, and a newly opened Kitty window. The desktop
+release gate above remains open.
