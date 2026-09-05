@@ -444,6 +444,7 @@ def prepare_bashrc(config_dir):
         "# Import pywal colorscheme from cache\n"
         '[ -f "${XDG_CACHE_HOME:-$HOME/.cache}/wal/sequences" ] && cat "${XDG_CACHE_HOME:-$HOME/.cache}/wal/sequences"\n'
         'source "${XDG_CACHE_HOME:-$HOME/.cache}/wal/colors-tty.sh" 2>/dev/null\n'
+        "unalias pywal 2>/dev/null || true\n"
         f"pywal() {{ {script} \"$@\"; }}\n"
         "# END hyprduma pywal\n"
     )

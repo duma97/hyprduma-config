@@ -2,6 +2,7 @@
 import configparser
 import importlib.util
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -386,6 +387,17 @@ class InstallerTests(unittest.TestCase):
         installer.update_bashrc(installer.config_home())
         self.assertFalse(bashrc.with_name(".bashrc.backup.1").exists())
         self.assertTrue(installer.run(["bash", "-n", str(bashrc)]))
+
+    def test_bashrc_can_be_sourced_with_loaded_legacy_alias_and_no_cache(self):
+        installer.update_bashrc(installer.config_home())
+        result = subprocess.run(
+            ["bash", "--noprofile", "--norc", "-O", "expand_aliases", "-c",
+             "alias pywal=legacy-command\nsource \"$HOME/.bashrc\"\ntype -t pywal"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(result.stdout.strip(), "function")
 
     def test_incomplete_managed_bashrc_block_fails_during_preflight(self):
         repo = self.repository()
