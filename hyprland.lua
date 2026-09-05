@@ -44,7 +44,9 @@ end
 
 hl.on("hyprland.start", function()
     -- One session owner restores wallpaper and starts the optional Caelestia shell.
-    hl.exec_cmd("python3 " .. shell_quote(config_home .. "/hypr/scripts/monitor-handler.py"))
+    hl.exec_cmd("mkdir -p " .. shell_quote(cache_home .. "/hyprduma") ..
+        " && python3 -u " .. shell_quote(config_home .. "/hypr/scripts/monitor-handler.py") ..
+        " >> " .. shell_quote(cache_home .. "/hyprduma/monitor-handler.log") .. " 2>&1")
     hl.exec_cmd("hyprctl setcursor Adwaita 24")
     hl.exec_cmd('mkdir -p "$HOME/Pictures/Screenshots"')
 end)

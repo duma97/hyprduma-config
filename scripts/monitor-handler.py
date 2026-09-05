@@ -49,8 +49,10 @@ def caelestia_installed():
 def run_component(command):
     try:
         theme.run_required(command)
+        return True
     except theme.ThemeError as error:
         print(f"monitor-handler: {error}", file=sys.stderr)
+        return False
 
 
 def ensure_components(startup=False, topology_changed=False):
@@ -74,7 +76,14 @@ def ensure_components(startup=False, topology_changed=False):
     if caelestia_installed():
         # This is the CLI's native launch command: -n refuses duplicate instances,
         # -d detaches the actual Quickshell shell. The CLI itself is not a daemon.
-        run_component(["qs", "-c", "caelestia", "-n", "-d"])
+        # The compositor's start event can precede readiness of shell services.
+        # Retry failed login launches; -n makes each attempt safe if already up.
+        attempts = 5 if startup else 1
+        for attempt in range(attempts):
+            if run_component(["qs", "-c", "caelestia", "-n", "-d"]):
+                break
+            if attempt + 1 < attempts:
+                time.sleep(2)
 
 
 def handle_event(line):

@@ -61,7 +61,7 @@ local function check_config(cache_present)
     assert(binds["SUPER + L"].options == "qs -c caelestia ipc call lock lock || hyprlock")
     events["hyprland.start"]()
     assert(#commands == 3, "Wallpaper/shell startup has more than one owner")
-    assert(commands[1] == "python3 '/tmp/config'\\''s folder/hypr/scripts/monitor-handler.py'")
+    assert(commands[1] == "mkdir -p '/tmp/custom cache/hyprduma' && python3 -u '/tmp/config'\\''s folder/hypr/scripts/monitor-handler.py' >> '/tmp/custom cache/hyprduma/monitor-handler.log' 2>&1")
     assert(#warnings == (cache_present and 1 or 0), "Damaged cache must be reported without aborting keybinds")
 end
 

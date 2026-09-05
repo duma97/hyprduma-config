@@ -107,6 +107,21 @@ class MonitorHandlerTests(unittest.TestCase):
         commands, _, _ = self.components("swaybg", running=True, caelestia=False)
         commands.assert_not_called()
 
+    def test_login_retries_failed_shell_launch_until_success(self):
+        original = handler.run_component
+        with patch.object(handler.theme, "run_required", side_effect=[
+            handler.theme.ThemeError("display not ready"), None,
+        ]) as launch, patch.object(handler.time, "sleep") as sleep, \
+             patch("sys.stderr"):
+            with patch.object(handler, "run_component", side_effect=original):
+                # Keep wallpaper work out of this shell startup regression.
+                with patch.object(handler.theme, "waypaper_settings", return_value={"backend": "none", "wallpapers": []}), \
+                     patch.object(handler, "caelestia_installed", return_value=True), \
+                     patch.object(handler.theme, "resolve_wallpaper", side_effect=handler.theme.ThemeError("no wallpaper")):
+                    handler.ensure_components(startup=True)
+        self.assertEqual(launch.call_count, 2)
+        sleep.assert_called_once_with(2)
+
     def test_caelestia_requires_runtime_and_qml_entrypoint(self):
         entry = Path(os.environ["XDG_CONFIG_HOME"]) / "quickshell/caelestia/shell.qml"
         entry.parent.mkdir(parents=True)
